@@ -10,7 +10,7 @@ pygame.init()
 
 WIDTH, HEIGHT = 1200, 700
 FPS = 60
-WORLD_WIDTH = 14000
+WORLD_WIDTH = 20000
 GROUND_Y = 590
 
 BUILD_GRID_X = 40
@@ -20,6 +20,269 @@ WALL_HEIGHT = BUILD_GRID_Y * 5
 RAMP_HEIGHT = BUILD_GRID_Y * 3
 WIDE_BUILD_WIDTH = BUILD_GRID_X * 3
 FLOOR_THICKNESS = BUILD_GRID_Y
+
+
+# BUNKERDAY WORLD UPDATE: named regions, scenery, and drivable cars.
+WORLD_REGIONS = [
+    (0, 2300, "PINE RIDGE", (78, 145, 92)),
+    (2300, 4700, "DUSTY DEPOT", (185, 145, 95)),
+    (4700, 7200, "NEON HARBOR", (85, 145, 170)),
+    (7200, 9700, "RUSTY FACTORY", (135, 125, 105)),
+    (9700, 12000, "SUNSET SUBURBS", (165, 145, 105)),
+    (12000, 14000, "CLIFFSIDE", (100, 150, 115)),
+    (14000, 16000, "FROST PEAKS", (135, 165, 185)),
+    (16000, 18000, "WILD FRONTIER", (105, 155, 95)),
+    (18000, WORLD_WIDTH, "SOLAR COAST", (195, 165, 105)),
+]
+VEHICLE_SPAWN_X = [430, 2850, 5350, 8050, 10600, 12800, 14900, 17200, 19100]
+vehicles = []
+vehicle_active = False
+vehicle_speed = 9.5
+
+# Persistent BUNKERDAY profile: coins, owned cosmetics, and quest progress.
+PROFILE_FOLDER = os.path.join(os.path.expanduser('~'), 'Library',
+                              'Application Support', 'Bunkerday')
+PROFILE_FILE = os.path.join(PROFILE_FOLDER, 'profile.json')
+SHOP_CATALOG = [
+    {'name': 'Crown Headgear', 'category': 'HEAD', 'option': 'Crown', 'price': 120},
+    {'name': 'Wing Pack', 'category': 'BACK', 'option': 'Wings', 'price': 180},
+    {'name': 'Stealth Outfit', 'category': 'OUTFIT',
+        'option': 'Stealth', 'price': 150},
+    {'name': 'Gold Weapon', 'category': 'WEAPON', 'option': 'Gold', 'price': 200},
+    {'name': 'Robot Face', 'category': 'FACE', 'option': 'Robot', 'price': 130},
+    {'name': 'Mohawk Hair', 'category': 'HAIR', 'option': 'Mohawk', 'price': 100},
+]
+coins = 0
+owned_cosmetics = set()
+quest_stats = {'matches': 0, 'eliminations': 0, 'chests': 0}
+claimed_quests = set()
+shop_open = False
+quests_open = False
+full_map_open = False
+match_rewarded = False
+match_coins_earned = 0
+shop_item_rects = [pygame.Rect(205 + (i % 3) * 270, 220 + (i // 3) * 175, 245, 145)
+                   for i in range(len(SHOP_CATALOG))]
+SHOP_BUTTON = pygame.Rect(875, 38, 125, 34)
+QUEST_BUTTON = pygame.Rect(1010, 38, 135, 34)
+
+
+def save_profile():
+    try:
+        os.makedirs(PROFILE_FOLDER, exist_ok=True)
+        payload = {
+            'coins': coins,
+            'owned_cosmetics': sorted(owned_cosmetics),
+            'quest_stats': quest_stats,
+            'claimed_quests': sorted(claimed_quests),
+        }
+        temp_path = PROFILE_FILE + '.tmp'
+        with open(temp_path, 'w') as f:
+            json.dump(payload, f, indent=2)
+        os.replace(temp_path, PROFILE_FILE)
+        return True
+    except (OSError, TypeError):
+        return False
+
+
+def load_profile():
+    global coins, owned_cosmetics, quest_stats, claimed_quests
+    try:
+        with open(PROFILE_FILE, 'r') as f:
+            data = json.load(f)
+        coins = max(0, int(data.get('coins', 0)))
+        owned_cosmetics = set(data.get('owned_cosmetics', []))
+        saved_stats = data.get('quest_stats', {})
+        for key in quest_stats:
+            quest_stats[key] = max(0, int(saved_stats.get(key, 0)))
+        claimed_quests = set(data.get('claimed_quests', []))
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+
+
+def add_coins(amount, reason=''):
+    global coins, match_coins_earned
+    amount = max(0, int(amount))
+    if amount <= 0:
+        return
+    coins += amount
+    match_coins_earned += amount
+    save_profile()
+
+
+def update_quest_progress(stat, amount=1):
+    if stat not in quest_stats:
+        return
+    quest_stats[stat] += max(0, int(amount))
+    quest_definitions = [
+        ('first_match', 'Play 1 match', 'matches', 1, 40),
+        ('eliminations_5', 'Get 5 eliminations', 'eliminations', 5, 100),
+        ('chests_3', 'Open 3 chests', 'chests', 3, 60),
+    ]
+    for quest_id, label, key, goal, reward in quest_definitions:
+        if quest_stats[key] >= goal and quest_id not in claimed_quests:
+            claimed_quests.add(quest_id)
+            add_coins(reward, 'quest')
+            # Save after recording the claim so rewards cannot be duplicated.
+            save_profile()
+
+
+def complete_match_rewards():
+    global match_rewarded
+    if match_rewarded:
+        return
+    match_rewarded = True
+    add_coins(20, 'match completion')
+    update_quest_progress('matches')
+    save_profile()
+
+
+def draw_shop_screen():
+    shade = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    shade.fill((4, 8, 18, 235))
+    screen.blit(shade, (0, 0))
+    panel = pygame.Rect(115, 65, 970, 575)
+    pygame.draw.rect(screen, (27, 39, 61), panel, border_radius=18)
+    pygame.draw.rect(screen, (105, 145, 190), panel, 3, border_radius=18)
+    title = big_font.render('BUNKERDAY SHOP', True, WHITE)
+    screen.blit(title, title.get_rect(center=(WIDTH // 2, 112)))
+    balance = font.render(f'YOUR COINS: {coins}', True, YELLOW)
+    screen.blit(balance, balance.get_rect(center=(WIDTH // 2, 165)))
+    for i, item in enumerate(SHOP_CATALOG):
+        rect = shop_item_rects[i]
+        owned = item['name'] in owned_cosmetics
+        pygame.draw.rect(screen, (49, 67, 94) if owned else (38, 52, 76),
+                         rect, border_radius=12)
+        pygame.draw.rect(screen, (100, 190, 145) if owned else (95, 125, 165),
+                         rect, 2, border_radius=12)
+        item_title = small_font.render(item['name'], True, WHITE)
+        screen.blit(item_title, item_title.get_rect(
+            center=(rect.centerx, rect.y + 38)))
+        state = 'OWNED - CLICK TO EQUIP' if owned else f"{item['price']} COINS"
+        state_color = (120, 235, 160) if owned else YELLOW
+        state_text = small_font.render(state, True, state_color)
+        screen.blit(state_text, state_text.get_rect(
+            center=(rect.centerx, rect.y + 88)))
+        category_text = small_font.render(
+            item['category'], True, (175, 195, 220))
+        screen.blit(category_text, category_text.get_rect(
+            center=(rect.centerx, rect.y + 116)))
+    draw_text('Click an item to buy or equip it. ESC closes the shop.',
+              300, 600, WHITE, small_font)
+
+
+def draw_quests_screen():
+    shade = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    shade.fill((4, 8, 18, 235))
+    screen.blit(shade, (0, 0))
+    panel = pygame.Rect(170, 90, 860, 520)
+    pygame.draw.rect(screen, (27, 39, 61), panel, border_radius=18)
+    pygame.draw.rect(screen, (105, 145, 190), panel, 3, border_radius=18)
+    title = big_font.render('QUESTS', True, WHITE)
+    screen.blit(title, title.get_rect(center=(WIDTH // 2, 145)))
+    draw_text(f'COIN BALANCE: {coins}', 470, 190, YELLOW, font)
+    rows = [
+        ('Play 1 match', quest_stats['matches'], 1, 40, 'first_match'),
+        ('Get 5 eliminations',
+         quest_stats['eliminations'], 5, 100, 'eliminations_5'),
+        ('Open 3 chests', quest_stats['chests'], 3, 60, 'chests_3'),
+    ]
+    for i, (label, progress, goal, reward, quest_id) in enumerate(rows):
+        y = 255 + i * 92
+        row = pygame.Rect(235, y, 730, 70)
+        pygame.draw.rect(screen, (44, 61, 86), row, border_radius=10)
+        draw_text(label, row.x + 20, row.y + 12, WHITE, font)
+        draw_text(f'PROGRESS: {min(progress, goal)}/{goal}', row.x + 20,
+                  row.y + 43, (185, 205, 230), small_font)
+        status = 'CLAIMED' if quest_id in claimed_quests else f'+{reward} COINS'
+        draw_text(status, row.right - 175, row.y + 27,
+                  (120, 235, 160) if quest_id in claimed_quests else YELLOW, small_font)
+    draw_text('Quests save automatically. ESC closes this screen.',
+              330, 565, WHITE, small_font)
+
+
+def draw_minimap():
+    map_rect = pygame.Rect(WIDTH - 218, 155, 198, 116)
+    pygame.draw.rect(screen, (13, 24, 35), map_rect, border_radius=8)
+    pygame.draw.rect(screen, (225, 235, 245), map_rect, 2, border_radius=8)
+    inner = map_rect.inflate(-8, -8)
+    # Color-coded regions and the map road.
+    for left, right, name, color in WORLD_REGIONS:
+        x1 = inner.x + int(left / WORLD_WIDTH * inner.width)
+        x2 = inner.x + int(right / WORLD_WIDTH * inner.width)
+        pygame.draw.rect(screen, color, (x1, inner.y,
+                         max(1, x2-x1), inner.height))
+    pygame.draw.line(screen, (65, 67, 72),
+                     (inner.x, inner.centery), (inner.right, inner.centery), 5)
+    for house in buildings:
+        px = inner.x + int(house.centerx / WORLD_WIDTH * inner.width)
+        if inner.left <= px <= inner.right:
+            pygame.draw.rect(screen, (235, 220, 185),
+                             (px, inner.centery - 5, 3, 5))
+    for car in vehicles:
+        if not car['occupied']:
+            px = inner.x + int(car['rect'].centerx / WORLD_WIDTH * inner.width)
+            pygame.draw.circle(screen, (245, 195, 65),
+                               (px, inner.centery + 9), 2)
+    player_px = inner.x + int(player.centerx / WORLD_WIDTH * inner.width)
+    pygame.draw.circle(screen, (255, 255, 255),
+                       (max(inner.x+2, min(inner.right-2, player_px)), inner.centery), 5)
+    pygame.draw.circle(screen, (40, 80, 130),
+                       (max(inner.x+2, min(inner.right-2, player_px)), inner.centery), 2)
+    label = small_font.render('TAB: FULL MAP', True, WHITE)
+    screen.blit(label, (map_rect.x + 4, map_rect.bottom + 4))
+
+
+def draw_full_map():
+    shade = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    shade.fill((5, 10, 20, 225))
+    screen.blit(shade, (0, 0))
+    panel = pygame.Rect(55, 45, WIDTH - 110, HEIGHT - 90)
+    pygame.draw.rect(screen, (25, 38, 57), panel, border_radius=16)
+    pygame.draw.rect(screen, (215, 230, 245), panel, 3, border_radius=16)
+    title = big_font.render('ISLAND MAP', True, WHITE)
+    screen.blit(title, title.get_rect(center=(WIDTH // 2, 82)))
+    map_area = pygame.Rect(95, 125, WIDTH - 190, HEIGHT - 220)
+    for left, right, name, color in WORLD_REGIONS:
+        x1 = map_area.x + int(left / WORLD_WIDTH * map_area.width)
+        x2 = map_area.x + int(right / WORLD_WIDTH * map_area.width)
+        region_rect = pygame.Rect(
+            x1, map_area.y, max(1, x2-x1), map_area.height)
+        pygame.draw.rect(screen, color, region_rect)
+        pygame.draw.rect(screen, (35, 50, 60), region_rect, 2)
+        region_label = small_font.render(name, True, WHITE)
+        screen.blit(region_label, region_label.get_rect(
+            center=(region_rect.centerx, map_area.y + 28)))
+    # Road and map features are drawn in world-to-map coordinates.
+    road_y = map_area.y + int(552 / HEIGHT * map_area.height)
+    pygame.draw.line(screen, (60, 65, 72), (map_area.x, road_y),
+                     (map_area.right, road_y), 13)
+    for house in buildings:
+        px = map_area.x + int(house.centerx / WORLD_WIDTH * map_area.width)
+        py = road_y - 10
+        pygame.draw.rect(screen, (245, 225, 190), (px-3, py-3, 6, 6))
+    for bot in targets:
+        px = map_area.x + int(bot.centerx / WORLD_WIDTH * map_area.width)
+        py = road_y + 18
+        pygame.draw.circle(screen, (220, 75, 75), (px, py), 4)
+    for car in vehicles:
+        if not car['occupied']:
+            px = map_area.x + \
+                int(car['rect'].centerx / WORLD_WIDTH * map_area.width)
+            pygame.draw.circle(screen, (245, 195, 65), (px, road_y + 32), 5)
+    px = map_area.x + int(player.centerx / WORLD_WIDTH * map_area.width)
+    pygame.draw.circle(screen, (255, 255, 255), (px, road_y), 9)
+    pygame.draw.circle(screen, (35, 95, 180), (px, road_y), 4)
+    draw_text('YOU', max(map_area.x, min(map_area.right - 45, px + 10)),
+              road_y - 23, WHITE, small_font)
+    draw_text('WHITE = YOU   RED = BOTS   GOLD = CARS   BEIGE = BUILDINGS',
+              170, HEIGHT - 72, WHITE, small_font)
+    draw_text('PRESS TAB OR ESC TO CLOSE', 430,
+              HEIGHT - 48, YELLOW, small_font)
+
+
+load_profile()
+
 
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption('Bunkerday - Battle Royale')
@@ -288,7 +551,11 @@ platforms = [
     pygame.Rect(8050, 475, 260, 25),
     pygame.Rect(8750, 385, 300, 25),
     pygame.Rect(9500, 465, 250, 25), pygame.Rect(10150, 390, 280, 25), pygame.Rect(10850, 470, 260, 25), pygame.Rect(
-        11550, 385, 300, 25), pygame.Rect(12250, 465, 280, 25), pygame.Rect(13000, 395, 300, 25), pygame.Rect(13600, 470, 250, 25)
+        11550, 385, 300, 25), pygame.Rect(12250, 465, 280, 25), pygame.Rect(13000, 395, 300, 25), pygame.Rect(13600, 470, 250, 25),
+    pygame.Rect(14350, 390, 300, 25), pygame.Rect(15050, 465, 260, 25),
+    pygame.Rect(15700, 380, 320, 25), pygame.Rect(16450, 465, 280, 25),
+    pygame.Rect(17150, 390, 300, 25), pygame.Rect(17850, 470, 260, 25),
+    pygame.Rect(18500, 385, 300, 25), pygame.Rect(19300, 465, 280, 25)
 ]
 
 buildings = [
@@ -303,10 +570,19 @@ buildings = [
     pygame.Rect(7450, 490, 180, 100),
     pygame.Rect(8350, 490, 190, 100),
     pygame.Rect(9250, 490, 170, 100), pygame.Rect(10100, 490, 180, 100), pygame.Rect(
-        11100, 490, 190, 100), pygame.Rect(12100, 490, 170, 100), pygame.Rect(13100, 490, 190, 100)
+        11100, 490, 190, 100), pygame.Rect(12100, 490, 170, 100), pygame.Rect(13100, 490, 190, 100),
+    pygame.Rect(14500, 490, 180, 100), pygame.Rect(15300, 490, 190, 100),
+    pygame.Rect(16200, 490, 170, 100), pygame.Rect(17000, 490, 190, 100),
+    pygame.Rect(18100, 490, 180, 100), pygame.Rect(19000, 490, 190, 100)
 ]
 
 building_health = [100 for _ in buildings]
+
+TREE_POSITIONS = [
+    (x, random.randint(505, 555), random.randint(22, 34))
+    for x in range(250, WORLD_WIDTH, 310)
+    if all(abs(x - house.centerx) > 125 for house in buildings)
+]
 
 player = pygame.Rect(160, 400, 40, 75)
 player_x = float(player.x)
@@ -389,6 +665,26 @@ WEAPONS = [
         'build_damage': 10,
         'pellets': 3,
         'spread': 0.045
+    },
+    {
+        'name': 'Tactical Rifle',
+        'capacity': 24,
+        'fire_delay': 9,
+        'speed': 20,
+        'damage': 23,
+        'build_damage': 11,
+        'pellets': 1,
+        'spread': 0.035
+    },
+    {
+        'name': 'Marksman Rifle',
+        'capacity': 10,
+        'fire_delay': 30,
+        'speed': 26,
+        'damage': 52,
+        'build_damage': 24,
+        'pellets': 1,
+        'spread': 0.012
     }
 ]
 
@@ -430,7 +726,8 @@ chests = [
     {'rect': pygame.Rect(x, GROUND_Y - 30, 34, 30),
      'opened': False, 'rarity': 'Common'}
     for x in (560, 1080, 1550, 2250, 3050, 3650,
-              4300, 4900, 5550, 6250, 6800, 7600, 8400, 9200, 10100, 11000, 11900, 12800, 13700)
+              4300, 4900, 5550, 6250, 6800, 7600, 8400, 9200, 10100, 11000, 11900, 12800, 13700,
+              14500, 15300, 16100, 16900, 17700, 18500, 19300)
 ]
 
 storm_center = (WORLD_WIDTH // 2, 390)
@@ -466,11 +763,14 @@ selected_mode = 'Battle Royale'
 game_started = False
 eliminations = 0
 DEATHMATCH_GOAL = 10
+MATCH_CHALLENGE_GOAL = 3
+challenge_complete = False
 
 MODE_BUTTONS = {
-    'Battle Royale': pygame.Rect(430, 260, 365, 62),
-    'Bot Deathmatch': pygame.Rect(430, 340, 365, 62),
-    'Practice': pygame.Rect(430, 420, 365, 62)
+    'Battle Royale': pygame.Rect(430, 240, 365, 56),
+    'Bot Deathmatch': pygame.Rect(430, 304, 365, 56),
+    'Practice': pygame.Rect(430, 368, 365, 56),
+    'Creative': pygame.Rect(430, 432, 365, 56)
 }
 START_BUTTON = pygame.Rect(875, 565, 270, 55)
 
@@ -513,7 +813,7 @@ join_code_input = ""
 adding_friend = False
 friend_input_text = ""
 friend_list = []
-lobby_message = "Customize your character, add friends, or create a party."
+lobby_message = "Choose a mode, customize your character, or create a party."
 
 SKIN_BUTTONS = [
     pygame.Rect(48 + (i % 3) * 105, 405 + (i // 3) * 58, 94, 48)
@@ -657,6 +957,8 @@ def open_nearby_chest():
 
         if player.inflate(90, 70).colliderect(chest['rect']):
             chest['opened'] = True
+            add_coins(5, 'chest')
+            update_quest_progress('chests')
 
             rarity = chest.get('rarity', 'Common')
             loot_count = {'Common': 2, 'Uncommon': 3,
@@ -1133,12 +1435,20 @@ def start_match(mode):
     global materials, selected_weapon, shoot_cooldown, build_mode, break_mode
     global weapon_inventory
     global editing, active_build_index, break_message, break_message_timer
-    global pending_player_shot
+    global pending_player_shot, vehicles, vehicle_active, challenge_complete
+    global match_rewarded, match_coins_earned
+    global shop_open, quests_open, full_map_open
 
     game_mode = mode
+    match_rewarded = False
+    match_coins_earned = 0
+    shop_open = False
+    quests_open = False
+    full_map_open = False
     game_won = False
     match_end_timer = 0.0
     eliminations = 0
+    challenge_complete = False
     health = 100
     shield = 50
     player.x = 160
@@ -1155,11 +1465,19 @@ def start_match(mode):
     storm_radius = storm_start_radius
     storm_started = False
     storm_damage_timer = 0.0
-    materials = 100
+    materials = 999999 if mode == 'Creative' else 100
     selected_weapon = 0
     weapon_inventory[:] = [0, 1, 2]
     shoot_cooldown = 0
     pending_player_shot = False
+    vehicle_active = False
+    vehicles = [
+        {'rect': pygame.Rect(x, GROUND_Y - 38, 92, 34),
+         'color': random.choice([(195, 55, 55), (55, 115, 205), (220, 175, 55),
+                                 (65, 155, 100), (125, 85, 175)]),
+         'occupied': False}
+        for x in VEHICLE_SPAWN_X
+    ]
     build_mode = False
     break_mode = False
     editing = False
@@ -1178,6 +1496,8 @@ def start_match(mode):
         weapon_reserve[weapon['name']] = weapon['capacity'] * 2
 
     count = 20 if mode == 'Battle Royale' else 10 if mode == 'Bot Deathmatch' else 0
+    if mode == 'Creative':
+        materials = 999999
     targets[:] = create_bot_positions(count)
     bot_health[:] = [100 for _ in targets]
     bot_shoot_cooldowns[:] = [random.uniform(0, 8) for _ in targets]
@@ -1254,6 +1574,27 @@ def draw_custom_character(center_x, center_y, color, scale=1.0):
             pygame.draw.rect(screen, prop_color, (body.left-int(8*scale), body.top +
                              int(12*scale), int(16*scale), int(30*scale)), border_radius=4)
 
+    # Arms sit behind the torso and use layered outlines/shading for depth.
+    shoulder_y = body.top + int(15 * scale)
+    elbow_y = body.top + int(34 * scale)
+    hand_y = body.bottom - int(8 * scale)
+    arm_outline = (24, 29, 39)
+    arm_width = max(4, int(11 * scale))
+    for side in (-1, 1):
+        shoulder = (center_x + side * int(17 * scale), shoulder_y)
+        elbow = (center_x + side * int(27 * scale), elbow_y)
+        wrist = (center_x + side * int(22 * scale), hand_y)
+        pygame.draw.line(screen, arm_outline, shoulder, elbow,
+                         arm_width + max(1, int(3 * scale)))
+        pygame.draw.line(screen, body_color, shoulder, elbow, arm_width)
+        pygame.draw.line(screen, arm_outline, elbow, wrist,
+                         arm_width + max(1, int(3 * scale)))
+        pygame.draw.line(screen, body_color, elbow, wrist, arm_width)
+        pygame.draw.circle(screen, (35, 39, 49), wrist, max(3, int(6 * scale)))
+        pygame.draw.circle(screen, (65, 70, 82), wrist, max(2, int(4 * scale)))
+
+    pygame.draw.rect(screen, (25, 30, 40), body.inflate(max(2, int(4*scale)), max(2, int(4*scale))),
+                     max(3, int(9*scale)), border_radius=max(4, int(9*scale)))
     pygame.draw.rect(screen, body_color, body,
                      border_radius=max(3, int(8*scale)))
     if outfit == "Stripes":
@@ -1264,12 +1605,48 @@ def draw_custom_character(center_x, center_y, color, scale=1.0):
         pygame.draw.rect(screen, (35, 35, 45), (center_x,
                          body.top, body_w//2, body_h), border_radius=3)
 
+    # Layered field vest, shoulder panels, belt, and utility pouches.
+    vest = pygame.Rect(center_x - int(14 * scale), body.top + int(8 * scale),
+                       int(28 * scale), int(37 * scale))
+    pygame.draw.rect(screen, (35, 43, 54), vest, max(1, int(2 * scale)),
+                     border_radius=max(2, int(4 * scale)))
+    pygame.draw.line(screen, (165, 175, 185),
+                     (center_x, vest.top + int(3 * scale)),
+                     (center_x, vest.bottom - int(3 * scale)), max(1, int(2 * scale)))
+    pygame.draw.line(screen, (105, 115, 125),
+                     (vest.left + int(4 * scale), vest.top + int(4 * scale)),
+                     (vest.right - int(4 * scale), vest.top + int(4 * scale)), max(1, int(2 * scale)))
+    for side in (-1, 1):
+        pouch = pygame.Rect(center_x + side * int(10 * scale) - int(4 * scale),
+                            body.bottom - int(19 * scale),
+                            max(3, int(8 * scale)), max(3, int(10 * scale)))
+        pygame.draw.rect(screen, (65, 75, 82), pouch,
+                         border_radius=max(1, int(2 * scale)))
+        shoulder_pad = (center_x + side * int(18 * scale),
+                        shoulder_y - int(1 * scale))
+        pygame.draw.circle(screen, (75, 85, 98),
+                           shoulder_pad, max(3, int(7 * scale)))
+    pygame.draw.line(screen, (25, 30, 38),
+                     (body.left + int(3 * scale), body.bottom - int(13 * scale)),
+                     (body.right - int(3 * scale), body.bottom - int(13 * scale)), max(2, int(4 * scale)))
+    pygame.draw.circle(screen, (190, 160, 75), (center_x,
+                       body.bottom - int(13 * scale)), max(1, int(3 * scale)))
+
     # Legs
     leg_color = (35, 35, 45)
     pygame.draw.line(screen, leg_color, (center_x-int(8*scale), body.bottom-int(2*scale)),
                      (center_x-int(13*scale), body.bottom+int(17*scale)), max(2, int(7*scale)))
     pygame.draw.line(screen, leg_color, (center_x+int(8*scale), body.bottom-int(2*scale)),
                      (center_x+int(13*scale), body.bottom+int(17*scale)), max(2, int(7*scale)))
+    for side in (-1, 1):
+        knee = (center_x + side * int(11 * scale),
+                body.bottom + int(8 * scale))
+        pygame.draw.circle(screen, (75, 82, 92), knee, max(2, int(4 * scale)))
+        boot = (center_x + side * int(13 * scale),
+                body.bottom + int(17 * scale))
+        pygame.draw.ellipse(screen, (22, 25, 32),
+                            (boot[0] - int(7 * scale), boot[1] - int(3 * scale),
+                             max(4, int(15 * scale)), max(3, int(8 * scale))))
 
     head_center = (center_x, body.top-int(2*scale))
     pygame.draw.circle(screen, (255, 210, 165), head_center, head_r)
@@ -1432,7 +1809,7 @@ def draw_custom_weapon(start, end, weapon_index=None):
         pygame.draw.circle(screen, metal, point(20, -9), 3)
         pygame.draw.polygon(screen, dark, [point(16, 4), point(
             22, 4), point(19, 12), point(14, 11)])
-    else:  # Burst rifle
+    elif weapon_index == 5:  # Burst rifle
         pygame.draw.polygon(
             screen, dark, [point(-5, -5), point(10, -5), point(15, 5), point(-5, 5)])
         pygame.draw.polygon(screen, body, [point(
@@ -1441,6 +1818,22 @@ def draw_custom_weapon(start, end, weapon_index=None):
         pygame.draw.polygon(screen, dark, [point(18, 5), point(
             25, 5), point(22, 14), point(16, 13)])
         pygame.draw.line(screen, metal, point(13, -9), point(27, -9), 2)
+    elif weapon_index == 6:  # Tactical rifle
+        pygame.draw.polygon(screen, dark, [point(-5, -5), point(12, -5),
+                                           point(16, 5), point(-5, 5)])
+        pygame.draw.polygon(screen, body, [point(5, -7), point(36, -7),
+                                           point(40, 5), point(6, 5)])
+        pygame.draw.line(screen, metal, point(35, -3), point(56, -3), 3)
+        pygame.draw.rect(screen, dark, (*point(17, 4), 7, 10))
+        pygame.draw.line(screen, metal, point(15, -10), point(29, -10), 2)
+    else:  # Marksman rifle
+        pygame.draw.polygon(screen, dark, [point(-10, -4), point(12, -4),
+                                           point(17, 5), point(-10, 5)])
+        pygame.draw.polygon(screen, body, [point(8, -5), point(34, -5),
+                                           point(38, 4), point(8, 4)])
+        pygame.draw.line(screen, metal, point(32, -3), point(66, -3), 3)
+        pygame.draw.line(screen, dark, point(16, -10), point(31, -10), 4)
+        pygame.draw.circle(screen, metal, point(23, -10), 3)
 
     # Small sight and muzzle make the direction immediately clear.
     pygame.draw.circle(screen, dark, point(8, -7), 2)
@@ -1470,6 +1863,17 @@ def draw_lobby():
     )
     screen.blit(subtitle, subtitle.get_rect(center=(WIDTH // 2, 91)))
 
+    for rect, label, color in (
+        (SHOP_BUTTON, 'SHOP', (145, 105, 35)),
+        (QUEST_BUTTON, 'QUESTS', (45, 115, 105)),
+    ):
+        pygame.draw.rect(screen, color, rect, border_radius=8)
+        pygame.draw.rect(screen, (230, 235, 245), rect, 2, border_radius=8)
+        button_label = small_font.render(label, True, WHITE)
+        screen.blit(button_label, button_label.get_rect(center=rect.center))
+    coin_label = small_font.render(f'COINS: {coins}', True, YELLOW)
+    screen.blit(coin_label, (875, 78))
+
     left_panel = pygame.Rect(25, 125, 350, 500)
     middle_panel = pygame.Rect(395, 125, 430, 500)
     right_panel = pygame.Rect(845, 125, 330, 500)
@@ -1495,7 +1899,7 @@ def draw_lobby():
         label = small_font.render(name, True, WHITE)
         screen.blit(label, label.get_rect(center=rect.center))
 
-    draw_text("CUSTOMIZE - USE THE ARROWS", 48, 407, YELLOW, small_font)
+    draw_text("CUSTOMIZATION OPTIONS", 48, 407, YELLOW, small_font)
     for category, rect in CUSTOM_ROWS.items():
         pygame.draw.rect(screen, (40, 55, 78), rect, border_radius=6)
         pygame.draw.rect(screen, (85, 110, 145), rect, 1, border_radius=6)
@@ -1504,7 +1908,7 @@ def draw_lobby():
                   5, (180, 200, 225), small_font)
         value = small_font.render(option, True, WHITE)
         screen.blit(value, value.get_rect(
-            midright=(rect.right - 38, rect.centery)))
+            center=(220, rect.centery)))
         for button_rect, symbol in ((CUSTOM_PREV_BUTTONS[category], "<"), (CUSTOM_NEXT_BUTTONS[category], ">")):
             pygame.draw.rect(screen, (70, 105, 155),
                              button_rect, border_radius=5)
@@ -1514,9 +1918,10 @@ def draw_lobby():
 
     # Game mode choices.
     descriptions = {
-        "Battle Royale": "20 bots  |  Last player standing",
+        "Battle Royale": "20 bots  |  Be the last player standing",
         "Bot Deathmatch": "10 bots  |  First to 10 eliminations",
-        "Practice": "No bots  |  Practice building and aiming"
+        "Practice": "No bots  |  Test weapons and movement",
+        "Creative": "No bots  |  Free build with unlimited materials"
     }
     for mode, rect in MODE_BUTTONS.items():
         selected = mode == selected_mode
@@ -1679,7 +2084,8 @@ def place_build():
         'health': 100
     })
 
-    materials -= build_cost
+    if game_mode != 'Creative':
+        materials -= build_cost
 
 
 def find_build_at_mouse():
@@ -1888,6 +2294,8 @@ async def main():
     global selected_skin, lobby_code, joining_lobby, join_code_input
     global lobby_message, pending_player_shot
     global adding_friend, friend_input_text
+    global vehicle_active, vehicles, challenge_complete, materials
+    global shop_open, quests_open, full_map_open, coins, owned_cosmetics
     running = True
 
     while running:
@@ -1907,7 +2315,8 @@ async def main():
             # Give the Settings button priority over every gameplay mouse binding.
             # This also lets it open/close reliably regardless of the selected controls.
             if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
-                    and game_started and settings_button.collidepoint(event.pos)):
+                    and game_started and not full_map_open
+                    and settings_button.collidepoint(event.pos)):
                 if settings_open:
                     settings_open = False
                     waiting_for_key = None
@@ -1918,7 +2327,53 @@ async def main():
                     settings_message = 'Bind keyboard or mouse; choose Tap, Hold, or Double.'
                 continue
 
+            if game_started and full_map_open and event.type in (
+                    pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEWHEEL):
+                continue
+
             if not game_started:
+                if event.type == pygame.KEYDOWN and (shop_open or quests_open):
+                    if event.key == pygame.K_ESCAPE:
+                        shop_open = False
+                        quests_open = False
+                    continue
+
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    if shop_open:
+                        for shop_index, item_rect in enumerate(shop_item_rects):
+                            if item_rect.collidepoint(event.pos):
+                                item = SHOP_CATALOG[shop_index]
+                                if item['name'] in owned_cosmetics:
+                                    category = item['category']
+                                    custom_selected[category] = CUSTOM_OPTIONS[category].index(
+                                        item['option'])
+                                    lobby_message = item['name'] + ' equipped!'
+                                elif coins >= item['price']:
+                                    coins -= item['price']
+                                    owned_cosmetics.add(item['name'])
+                                    category = item['category']
+                                    custom_selected[category] = CUSTOM_OPTIONS[category].index(
+                                        item['option'])
+                                    lobby_message = item['name'] + \
+                                        ' purchased and equipped!'
+                                    save_profile()
+                                else:
+                                    lobby_message = 'Not enough coins for ' + \
+                                        item['name'] + '.'
+                                break
+                        continue
+                    if quests_open:
+                        quests_open = False
+                        continue
+                    if SHOP_BUTTON.collidepoint(event.pos):
+                        shop_open = True
+                        quests_open = False
+                        continue
+                    if QUEST_BUTTON.collidepoint(event.pos):
+                        quests_open = True
+                        shop_open = False
+                        continue
+
                 if event.type == pygame.KEYDOWN:
                     if adding_friend:
                         if event.key == pygame.K_ESCAPE:
@@ -1970,6 +2425,8 @@ async def main():
                             selected_mode = 'Bot Deathmatch'
                         elif event.key == pygame.K_3:
                             selected_mode = 'Practice'
+                        elif event.key == pygame.K_4:
+                            selected_mode = 'Creative'
                         elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
                             start_match(selected_mode)
 
@@ -2065,7 +2522,40 @@ async def main():
                         settings_open = False
                     continue
 
+                if full_map_open:
+                    if event.key in (pygame.K_TAB, pygame.K_ESCAPE):
+                        full_map_open = False
+                    continue
+                if event.key == pygame.K_TAB:
+                    full_map_open = True
+                    continue
+
                 if game_won:
+                    continue
+
+                # V enters/exits a nearby drivable car.
+                if event.key == pygame.K_v and not editing:
+                    if vehicle_active:
+                        vehicle_active = False
+                        for car in vehicles:
+                            if car['occupied']:
+                                car['occupied'] = False
+                                car['rect'].centerx = player.centerx
+                                break
+                    else:
+                        nearby_vehicle = next(
+                            (car for car in vehicles
+                             if not car['occupied']
+                             and abs(car['rect'].centerx - player.centerx) < 105),
+                            None
+                        )
+                        if nearby_vehicle is not None:
+                            nearby_vehicle['occupied'] = True
+                            vehicle_active = True
+                            build_mode = False
+                            break_mode = False
+                            player.centerx = nearby_vehicle['rect'].centerx
+                            player_x = float(player.x)
                     continue
 
                 if editing:
@@ -2133,7 +2623,7 @@ async def main():
             mouse_action_consumed = False
             if (event.type == pygame.MOUSEBUTTONDOWN and not settings_open
                     and not settings_button.collidepoint(event.pos)
-                    and not (game_mode == 'Practice' and practice_exit_button.collidepoint(event.pos))
+                    and not (game_mode in ('Practice', 'Creative') and practice_exit_button.collidepoint(event.pos))
                     # Left-click belongs to the active build/edit/break tool,
                     # not the default left-mouse Fire weapon binding.
                     and not (event.button == 1 and game_started
@@ -2186,8 +2676,9 @@ async def main():
                 elif game_won:
                     pass
 
-                elif (game_mode == 'Practice'
+                elif (game_mode in ('Practice', 'Creative')
                       and practice_exit_button.collidepoint(event.pos)):
+                    complete_match_rewards()
                     game_started = False
                     game_won = False
                     match_end_timer = 0.0
@@ -2199,7 +2690,7 @@ async def main():
                     cancel_edit()
                     bullets.clear()
                     enemy_bullets.clear()
-                    lobby_message = 'You left Practice Mode. Choose another mode!'
+                    lobby_message = f'You left {game_mode} Mode. Choose another mode!'
 
                 elif settings_button.collidepoint(event.pos):
                     pass  # Handled at the top of the event loop.
@@ -2261,6 +2752,7 @@ async def main():
             pygame.display.flip()
 
             if match_end_timer <= 0:
+                complete_match_rewards()
                 game_started = False
                 game_won = False
                 match_end_timer = 0.0
@@ -2277,10 +2769,12 @@ async def main():
         if (
             game_started
             and not settings_open
+            and not full_map_open
             and not game_won
             and not editing
             and not build_mode
             and not break_mode
+            and not vehicle_active
             and (pending_player_shot or fire_held)
         ):
             if fire_player_weapon():
@@ -2288,10 +2782,14 @@ async def main():
 
         if not game_started:
             draw_lobby()
+            if shop_open:
+                draw_shop_screen()
+            elif quests_open:
+                draw_quests_screen()
             pygame.display.flip()
             continue
 
-        if settings_open:
+        if settings_open or full_map_open:
             dt = 0
 
         keys = pygame.key.get_pressed()
@@ -2303,7 +2801,7 @@ async def main():
 
         velocity_x = 0
 
-        if not editing and not settings_open and not game_won:
+        if not editing and not settings_open and not full_map_open and not game_won:
             # Read movement directly from the currently configured keyboard keys.
             # This avoids movement getting stuck/broken by saved Tap/Double modes
             # or missed KEYDOWN/KEYUP events when the window briefly loses focus.
@@ -2314,9 +2812,9 @@ async def main():
             right_down = (right_key is not None and action_mouse.get('Move right') is None
                           and keys[right_key])
             if left_down:
-                velocity_x = -speed
+                velocity_x = -(vehicle_speed if vehicle_active else speed)
             if right_down:
-                velocity_x = speed
+                velocity_x = vehicle_speed if vehicle_active else speed
 
         # Horizontal movement is allowed both on the ground and in the air.
         # Only resolve a platform collision when the player actually crosses
@@ -2348,7 +2846,12 @@ async def main():
         previous_top = player.top
         was_on_ground = on_ground
 
-        if not game_won:
+        if vehicle_active:
+            player.bottom = GROUND_Y
+            player_y = float(player.y)
+            velocity_y = 0
+            on_ground = True
+        elif not game_won:
             velocity_y += gravity * dt
             player_y += velocity_y * dt
 
@@ -2436,7 +2939,7 @@ async def main():
 
         jump_buffer = max(0, jump_buffer - dt)
 
-        if not game_won and jump_buffer > 0 and coyote_timer > 0:
+        if not game_won and not vehicle_active and jump_buffer > 0 and coyote_timer > 0:
             velocity_y = jump_power
             on_ground = False
             jump_buffer = 0
@@ -2494,6 +2997,11 @@ async def main():
                                                'amount': random.randint(18, 36), 'rarity': 'Common',
                                                'weapon_index': random.randrange(len(WEAPONS)), 'ammo': 0})
                             eliminations += 1
+                            add_coins(2, 'elimination')
+                            update_quest_progress('eliminations')
+                            if not challenge_complete and eliminations >= MATCH_CHALLENGE_GOAL:
+                                challenge_complete = True
+                                materials = min(500, materials + 75)
                             if game_mode == 'Bot Deathmatch':
                                 targets[hit_index].x = -1000
                                 bot_respawn_timers[hit_index] = 150
@@ -2571,7 +3079,8 @@ async def main():
                     # the distance before stopping to fire.
                     bot_stop_distance = 180
                     if abs(dx) > bot_stop_distance:
-                        move_speed = 2.5 * dt
+                        # Small personality differences make bots feel less identical.
+                        move_speed = (2.0 + (index % 4) * 0.22) * dt
                         step_x = (1 if dx > 0 else -1) * \
                             min(abs(dx) - bot_stop_distance, move_speed)
                         candidate = bot.copy()
@@ -2625,7 +3134,10 @@ async def main():
                         and bot_ammo[index] > 0
                     ):
                         aim_angle = math.atan2(dy, dx)
-                        aim_angle += random.uniform(-0.045, 0.045)
+                        # Bots lead moving targets a little, but keep imperfect aim.
+                        if chosen_target is player:
+                            aim_angle += (velocity_x * 0.018)
+                        aim_angle += random.uniform(-0.075, 0.075)
                         bullet_speed = 14
                         enemy_bullets.append([
                             float(bot.centerx), float(bot.centery),
@@ -2746,6 +3258,90 @@ async def main():
                 (hill_x, 390, 600, 300)
             )
 
+        # Distant harbor cranes add a recognizable skyline in NEON HARBOR.
+        for crane_x in (5050, 5550, 6100, 6650):
+            sx = crane_x - camera_x
+            if -100 < sx < WIDTH + 100:
+                pygame.draw.line(screen, (75, 90, 105),
+                                 (sx, 360), (sx, 520), 8)
+                pygame.draw.line(screen, (75, 90, 105),
+                                 (sx - 65, 365), (sx + 85, 365), 7)
+                pygame.draw.line(screen, (95, 110, 125),
+                                 (sx + 65, 365), (sx + 65, 430), 4)
+                pygame.draw.rect(screen, (175, 145, 70),
+                                 (sx + 53, 430, 24, 18), border_radius=2)
+
+        # Region ground tint, road, roadside markings, trees and location signs.
+        for region_left, region_right, region_name, region_color in WORLD_REGIONS:
+            left = int(region_left - camera_x)
+            right = int(region_right - camera_x)
+            if right >= 0 and left <= WIDTH:
+                pygame.draw.rect(screen, region_color, (max(0, left), 575,
+                                                        min(WIDTH, right) - max(0, left), 15))
+                if left < WIDTH and right > 0:
+                    sign_x = max(35, min(WIDTH - 160, (left + right) // 2))
+                    sign = pygame.Rect(sign_x, 145, 155, 34)
+                    pygame.draw.rect(screen, (28, 48, 55),
+                                     sign, border_radius=6)
+                    pygame.draw.rect(screen, (210, 220, 195),
+                                     sign, 2, border_radius=6)
+                    label = small_font.render(region_name, True, WHITE)
+                    screen.blit(label, label.get_rect(center=sign.center))
+
+        road_y = 552
+        pygame.draw.rect(screen, (65, 68, 74), (0, road_y, WIDTH, 38))
+        pygame.draw.line(screen, (235, 205, 110), (0, road_y + 19),
+                         (WIDTH, road_y + 19), 3)
+        for dash_x in range(-80, WIDTH + 100, 100):
+            world_dash = dash_x + (camera_x % 100)
+            pygame.draw.line(screen, (225, 225, 210),
+                             (dash_x - (camera_x % 100), road_y + 19),
+                             (dash_x - (camera_x % 100) + 42, road_y + 19), 3)
+
+        for tree_x, tree_y, tree_size in TREE_POSITIONS:
+            sx = int(tree_x - camera_x)
+            if -60 < sx < WIDTH + 60:
+                pygame.draw.rect(screen, (95, 65, 40),
+                                 (sx - 5, tree_y, 10, 34))
+                pygame.draw.circle(screen, (35, 115, 65),
+                                   (sx, tree_y - 10), tree_size)
+                pygame.draw.circle(screen, (55, 145, 78),
+                                   (sx - tree_size // 2, tree_y - 18),
+                                   max(8, tree_size // 2))
+
+        # Snowy ridges and coastal palms distinguish the newly added regions.
+        for peak_x in (14350, 14850, 15350, 15850):
+            sx = peak_x - camera_x
+            if -180 < sx < WIDTH + 180:
+                pygame.draw.polygon(screen, (115, 145, 165),
+                                    [(sx - 105, 575), (sx, 300), (sx + 115, 575)])
+                pygame.draw.polygon(screen, (225, 238, 245),
+                                    [(sx - 38, 395), (sx, 300), (sx + 42, 405),
+                                     (sx + 10, 385), (sx - 5, 410)])
+        for palm_x in (18200, 18700, 19400, 19800):
+            sx = palm_x - camera_x
+            if -90 < sx < WIDTH + 90:
+                pygame.draw.line(screen, (105, 75, 42),
+                                 (sx, 570), (sx + 8, 465), 8)
+                for angle in (-2.6, -1.8, -0.8, 0.1, 0.9):
+                    end = (sx + int(math.cos(angle) * 48),
+                           465 + int(math.sin(angle) * 32))
+                    pygame.draw.line(screen, (40, 125, 65),
+                                     (sx + 8, 465), end, 7)
+
+        # Small industrial skyline around the factory district.
+        for factory_x in (7550, 7820, 8150, 8420, 8750):
+            sx = factory_x - camera_x
+            if -100 < sx < WIDTH + 100:
+                pygame.draw.rect(screen, (90, 100, 108),
+                                 (sx, 330, 72, 220))
+                pygame.draw.rect(screen, (55, 65, 75),
+                                 (sx + 12, 350, 48, 28))
+                pygame.draw.rect(screen, (115, 120, 125),
+                                 (sx + 25, 270, 22, 60))
+                pygame.draw.circle(screen, (155, 165, 170),
+                                   (sx + 36, 260), 12, 3)
+
         for platform in platforms:
             rect = pygame.Rect(
                 platform.x - camera_x,
@@ -2782,6 +3378,34 @@ async def main():
             )
 
             draw_health_bar(rect, building_health[index])
+
+        # Parked and occupied cars.
+        for car in vehicles:
+            if car['occupied']:
+                continue
+            car_rect = car['rect'].copy()
+            car_screen = pygame.Rect(car_rect.x - camera_x, car_rect.y,
+                                     car_rect.width, car_rect.height)
+            if -120 < car_screen.x < WIDTH + 120:
+                pygame.draw.rect(
+                    screen, car['color'], car_screen, border_radius=9)
+                pygame.draw.rect(screen, (28, 35, 45),
+                                 car_screen, 3, border_radius=9)
+                pygame.draw.polygon(screen, (125, 190, 220), [
+                    (car_screen.x + 23, car_screen.y + 3),
+                    (car_screen.x + 66, car_screen.y + 3),
+                    (car_screen.x + 57, car_screen.y - 13),
+                    (car_screen.x + 32, car_screen.y - 13)
+                ])
+                for wheel_x in (car_screen.x + 20, car_screen.right - 20):
+                    pygame.draw.circle(screen, (25, 27, 32),
+                                       (wheel_x, car_screen.bottom), 10)
+                    pygame.draw.circle(screen, (150, 155, 165),
+                                       (wheel_x, car_screen.bottom), 4)
+                if not car['occupied']:
+                    hint = small_font.render("V: DRIVE", True, WHITE)
+                    screen.blit(hint, hint.get_rect(
+                        midbottom=(car_screen.centerx, car_screen.top - 5)))
 
         for chest in chests:
             chest_rect = pygame.Rect(
@@ -3002,7 +3626,7 @@ async def main():
                 WIDTH // 2 - 220, 70, WHITE, small_font
             )
 
-        if build_mode and not editing and not game_won:
+        if build_mode and not editing and not game_won and not vehicle_active:
             mx, my = pygame.mouse.get_pos()
             preview = get_build_rect(mx, my)
 
@@ -3125,12 +3749,32 @@ async def main():
             player.height
         )
 
-        draw_custom_character(
-            player_draw.centerx,
-            player_draw.centery - 3,
-            LOBBY_SKINS[selected_skin][1],
-            0.78
-        )
+        if vehicle_active:
+            car_color = next((car['color'] for car in vehicles if car['occupied']),
+                             (195, 55, 55))
+            car_rect = pygame.Rect(player_draw.centerx - 46,
+                                   player_draw.bottom - 38, 92, 34)
+            pygame.draw.rect(screen, car_color, car_rect, border_radius=9)
+            pygame.draw.rect(screen, (28, 35, 45),
+                             car_rect, 3, border_radius=9)
+            pygame.draw.polygon(screen, (125, 190, 220), [
+                (car_rect.x + 23, car_rect.y + 3),
+                (car_rect.x + 66, car_rect.y + 3),
+                (car_rect.x + 57, car_rect.y - 13),
+                (car_rect.x + 32, car_rect.y - 13)
+            ])
+            for wheel_x in (car_rect.x + 20, car_rect.right - 20):
+                pygame.draw.circle(screen, (25, 27, 32),
+                                   (wheel_x, car_rect.bottom), 10)
+                pygame.draw.circle(screen, (150, 155, 165),
+                                   (wheel_x, car_rect.bottom), 4)
+        else:
+            draw_custom_character(
+                player_draw.centerx,
+                player_draw.centery - 3,
+                LOBBY_SKINS[selected_skin][1],
+                0.78
+            )
 
         mx, my = pygame.mouse.get_pos()
 
@@ -3173,6 +3817,9 @@ async def main():
         draw_text(f'HEALTH: {health}', 290, 15)
         draw_text(f'SHIELD: {shield}', 290, 45)
         draw_text(game_mode.upper(), WIDTH // 2 - 70, 15, YELLOW, small_font)
+        if vehicle_active:
+            draw_text('DRIVING: V TO EXIT', WIDTH // 2 -
+                      85, 48, (255, 225, 100), small_font)
 
         weapon = WEAPONS[selected_weapon]
         rarity_name = weapon_rarities[selected_weapon]
@@ -3193,6 +3840,8 @@ async def main():
             )
         elif game_mode == 'Bot Deathmatch':
             storm_status = f'ELIMINATIONS: {eliminations}/{DEATHMATCH_GOAL}'
+        elif game_mode == 'Creative':
+            storm_status = 'CREATIVE MODE - FREE BUILD - UNLIMITED MATERIALS'
         else:
             storm_status = 'PRACTICE MODE - NO ENEMY BOTS'
 
@@ -3226,9 +3875,19 @@ async def main():
         elif game_mode == 'Bot Deathmatch':
             draw_text(
                 f'KILLS: {eliminations}/{DEATHMATCH_GOAL}', WIDTH - 180, 60)
+        elif game_mode == 'Creative':
+            draw_text('CREATIVE', WIDTH - 180, 60)
         else:
             draw_text('PRACTICE', WIDTH - 180, 60)
         draw_text(f'MATERIALS: {materials}', WIDTH - 260, 100)
+        draw_text(f'COINS: {coins}', WIDTH - 260, 125, YELLOW, small_font)
+        if game_mode not in ('Practice', 'Creative'):
+            challenge_text = ('CHALLENGE COMPLETE: +75 MATERIALS'
+                              if challenge_complete
+                              else f'CHALLENGE: GET {MATCH_CHALLENGE_GOAL} ELIMINATIONS ({eliminations}/{MATCH_CHALLENGE_GOAL})')
+            draw_text(challenge_text, 20, 165,
+                      (120, 235, 150) if challenge_complete else YELLOW,
+                      small_font)
 
         draw_text(
             f"{binding_label('Move left')}/"
@@ -3250,7 +3909,7 @@ async def main():
         )
 
         draw_text(
-            '3/4/5: WEAPON SLOTS   X: DROP WEAPON   SCROLL: SWITCH   R: RELOAD',
+            'V: ENTER/EXIT CAR   3/4/5: WEAPONS   X: DROP   SCROLL: SWITCH   R: RELOAD',
             20, HEIGHT - 96, WHITE, small_font
         )
 
@@ -3264,14 +3923,14 @@ async def main():
         label = font.render('SETTINGS', True, WHITE)
         screen.blit(label, label.get_rect(center=settings_button.center))
 
-        if game_mode == 'Practice' and not settings_open and not game_won:
+        if game_mode in ('Practice', 'Creative') and not settings_open and not game_won:
             pygame.draw.rect(
                 screen, (170, 45, 45), practice_exit_button, border_radius=8
             )
             pygame.draw.rect(
                 screen, WHITE, practice_exit_button, 2, border_radius=8
             )
-            exit_label = font.render('EXIT PRACTICE', True, WHITE)
+            exit_label = font.render('EXIT MODE', True, WHITE)
             screen.blit(
                 exit_label,
                 exit_label.get_rect(center=practice_exit_button.center)
@@ -3466,6 +4125,12 @@ async def main():
                 small_font
             )
 
+        if game_started and health > 0 and not settings_open and not game_won:
+            if full_map_open:
+                draw_full_map()
+            else:
+                draw_minimap()
+
         pygame.display.flip()
 
         # Return to the lobby shortly after either elimination or victory.
@@ -3475,6 +4140,7 @@ async def main():
 
             match_end_timer -= dt
             if match_end_timer <= 0:
+                complete_match_rewards()
                 game_started = False
                 game_won = False
                 match_end_timer = 0.0
